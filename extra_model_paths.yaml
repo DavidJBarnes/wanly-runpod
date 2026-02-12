@@ -1,0 +1,6 @@
+wanly:
+    base_path: /workspace/models
+    clip: clip/
+    vae: vae/
+    diffusion_models: diffusion_models/
+    loras: loras/

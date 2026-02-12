@@ -1,0 +1,59 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_ROOT_USER_ACTION=ignore
+
+# System deps + Python 3.11 via deadsnakes PPA
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev \
+    git ffmpeg aria2 wget curl \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# PyTorch with CUDA 12.4 support (install before ComfyUI to avoid CPU-only torch)
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# ComfyUI pinned to a known-good commit
+ARG COMFYUI_COMMIT=4a93a62371b6
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
+    cd ComfyUI && git checkout ${COMFYUI_COMMIT}
+RUN pip install --no-cache-dir -r ComfyUI/requirements.txt
+
+# Custom nodes: Frame Interpolation (RIFE)
+RUN git clone --depth 1 https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git \
+    ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation && \
+    pip install --no-cache-dir -r ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements.txt
+
+# Custom nodes: Video Helper Suite
+RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
+    ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite && \
+    pip install --no-cache-dir -r ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt
+
+# Custom nodes: ReActor (face swap)
+# Directory name matches daemon's node_checker.py primary key
+RUN git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
+    ComfyUI/custom_nodes/comfyui-reactor-node && \
+    pip install --no-cache-dir -r ComfyUI/custom_nodes/comfyui-reactor-node/requirements.txt
+
+# Daemon Python dependencies (daemon code itself is cloned at boot for freshness)
+RUN pip install --no-cache-dir httpx pydantic-settings python-dotenv websockets
+
+# Config and scripts
+COPY extra_model_paths.yaml /app/ComfyUI/extra_model_paths.yaml
+COPY download_models.sh /app/download_models.sh
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh /app/download_models.sh
+
+EXPOSE 8188
+
+ENTRYPOINT ["/app/start.sh"]
