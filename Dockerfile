@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 \
+    && pip install --no-cache-dir setuptools wheel \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
