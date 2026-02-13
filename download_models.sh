@@ -16,7 +16,11 @@ download() {
     local url="$1"
     local dest="$2"
 
-    if [ -f "$dest" ] && [ -s "$dest" ]; then
+    # .aria2 control file means a previous download was interrupted
+    if [ -f "${dest}.aria2" ]; then
+        echo "RESUMING: $(basename "$dest") (incomplete from previous run)"
+        rm -f "$dest"
+    elif [ -f "$dest" ] && [ -s "$dest" ]; then
         echo "SKIP: $(basename "$dest") (already exists)"
         return 0
     fi
