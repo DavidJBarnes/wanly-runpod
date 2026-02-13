@@ -31,10 +31,12 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
 RUN pip install --no-cache-dir -r ComfyUI/requirements.txt
 
 # Custom nodes: Frame Interpolation (RIFE)
-# This repo has no requirements.txt — uses install.py or requirements-with-cupy.txt
+# Install cupy-cuda12x directly (pre-built wheel) — the requirements file's cupy-wheel
+# is a source meta-package that fails on CI runners without a GPU
+RUN pip install --no-cache-dir cupy-cuda12x
 RUN git clone --depth 1 https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git \
     ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation && \
-    pip install --no-cache-dir -r ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-with-cupy.txt
+    pip install --no-cache-dir -r ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt
 
 # Custom nodes: Video Helper Suite
 RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
