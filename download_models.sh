@@ -56,4 +56,10 @@ download "${HF_BASE}/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safeten
 download "${HF_BASE}/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors" \
     "${MODELS_DIR}/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
 
+# ReActor face swap model — goes into ComfyUI/models/insightface (not persistent volume)
+INSIGHTFACE_DIR="/app/ComfyUI/models/insightface"
+mkdir -p "$INSIGHTFACE_DIR"
+download "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx" \
+    "${INSIGHTFACE_DIR}/inswapper_128.onnx"
+
 echo "=== Model download complete ==="
