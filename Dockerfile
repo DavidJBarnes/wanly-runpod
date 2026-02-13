@@ -45,9 +45,11 @@ RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.
 
 # Custom nodes: ReActor (face swap)
 # Directory name matches daemon's node_checker.py primary key
+# onnxruntime-gpu is required at runtime but not in ReActor's requirements.txt
 RUN git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
     ComfyUI/custom_nodes/comfyui-reactor-node && \
-    pip install --no-cache-dir -r ComfyUI/custom_nodes/comfyui-reactor-node/requirements.txt
+    pip install --no-cache-dir -r ComfyUI/custom_nodes/comfyui-reactor-node/requirements.txt && \
+    pip install --no-cache-dir onnxruntime-gpu
 
 # Daemon Python dependencies (daemon code itself is cloned at boot for freshness)
 RUN pip install --no-cache-dir httpx pydantic-settings python-dotenv websockets
