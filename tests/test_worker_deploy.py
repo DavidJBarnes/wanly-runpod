@@ -192,3 +192,31 @@ def test_no_secret_is_committed():
     """worker.env carries the queue key and must never be in the repo."""
     assert not (DEPLOY / "worker.env").exists()
     assert (DEPLOY / "worker.env.example").read_text().count("QUEUE_API_KEY=\n") == 1
+
+
+class TestTheTimerActuallyFires:
+    """A timer that is enabled but has no next elapse is the worst failure here, because
+    `systemctl is-enabled` says "enabled" and `list-timers` lists it (wanly-gpu-docker#72).
+
+    The first version used OnBootSec + OnUnitActiveSec. OnUnitActiveSec only re-arms once the
+    TIMER has triggered the service; with OnBootSec already past there was nothing to compute
+    a next elapse from, so it sat `active (elapsed)` with `Trigger: n/a` -- installed, and
+    never going to run again. Observed on the 3090.
+    """
+
+    TIMER = DEPLOY / "wanly-worker-update.timer"
+
+    def test_it_uses_an_absolute_schedule(self):
+        s = self.TIMER.read_text()
+        assert "OnCalendar=" in s, (
+            "the timer needs an absolute schedule; OnBootSec/OnUnitActiveSec stops "
+            "re-arming and the timer silently never fires again"
+        )
+
+    def test_it_does_not_rely_on_onunitactivesec(self):
+        assert "OnUnitActiveSec=" not in self.TIMER.read_text()
+
+    def test_it_catches_up_after_downtime(self):
+        """A box that was off through a release should update on the next boot, not wait for
+        the following slot."""
+        assert "Persistent=true" in self.TIMER.read_text()
