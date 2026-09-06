@@ -24,7 +24,7 @@ ENV_FILE="${WORKER_ENV:-$HERE/worker.env}"
 set -a; . "$ENV_FILE"; set +a
 
 IMAGE="${IMAGE:-davidjbarnes/wanly-gpu-docker:latest}"
-NAME="${NAME:-wanly-ltx}"
+NAME="${NAME:-wanly-gpu-docker}"
 
 : "${QUEUE_API_KEY:?set QUEUE_API_KEY in $ENV_FILE}"
 : "${FRIENDLY_NAME:?set FRIENDLY_NAME in $ENV_FILE}"
