@@ -38,7 +38,33 @@ exec > >(while IFS= read -r line; do
 echo "=== Wanly GPU Worker (LTX 2.3) ==="
 echo "image build: ${GIT_SHA:-unknown}"
 echo "(this log is also at /workspace/logs/daemon.log)"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "WARNING: no GPU visible"
+# ---------- 0. A GPU, or nothing ----------
+# This used to print "WARNING: no GPU visible" and carry on, which is how a container started
+# by hand -- `docker run <image>` with no --gpus and no -v -- spent nine minutes downloading
+# 10Eros over the 3090's own complete copy of it (#77). Every later phase was going to fail;
+# the only question was how much bandwidth it burned first.
+#
+# There is no useful boot without a GPU. A worker that cannot render should not register,
+# should not claim, and should not stage 58 GB of weights it will never load.
+#
+# ALLOW_NO_GPU=1 exists for a debug shell into the image, and says so in the log so it can
+# never be mistaken for a healthy worker.
+if ! GPU_LINE=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null) \
+   || [ -z "$GPU_LINE" ]; then
+    if [ "${ALLOW_NO_GPU:-0}" = "1" ]; then
+        echo "WARNING: no GPU visible — continuing because ALLOW_NO_GPU=1."
+        echo "WARNING: this container CANNOT render. Do not expect it to claim work."
+    else
+        echo "!! FATAL: no GPU visible. nvidia-smi failed or reported nothing."
+        echo "!! On the 3090 this means the container was started without --gpus all;"
+        echo "!! use deploy/run-worker.sh rather than a hand-written docker run."
+        echo "!! On a pod it means the host is broken — kill it and take another."
+        echo "!! Set ALLOW_NO_GPU=1 only for a debug shell, never for a worker."
+        exit 1
+    fi
+else
+    echo "$GPU_LINE"
+fi
 
 # ---------- 0. sshd for direct TCP access (RunPod injects PUBLIC_KEY) ----------
 if [ -n "${PUBLIC_KEY:-}" ]; then
