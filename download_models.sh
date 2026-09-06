@@ -7,6 +7,17 @@
 #
 # On a fresh pod with no such mount there IS a fetch to do, and it is written below.
 #
+# WHICH OF THE TWO IT IS, IS DECIDED BY THE MOUNT, NOT BY GUESSWORK. A bind-mounted $MODELS is
+# host-provided and authoritative: a missing file there is a mount or host-tree fault and this
+# script says so and stops. An unmounted $MODELS is a pod's own directory and gets filled.
+#
+# That distinction is the whole of #77. A container started by hand with no -v and no --gpus
+# had an empty $MODELS, so every file legitimately looked missing, and it began downloading
+# 10Eros at 3 MB/s over the 3090's own complete copy of it -- onto a 30-40 GB overlay that
+# could never have held the 43 GB file. Nothing in the boot said any of that was wrong,
+# because on a pod it is the correct behaviour. It is now three refusals, each in one second:
+# no GPU (start.sh), an incomplete bind mount, and nowhere to put the bytes.
+#
 # WHAT a pod needs comes from the workflow, not from what happens to sit in the folder on the
 # 3090. That box holds 217 GB because it accumulated alternates -- three 43 GB checkpoints the
 # recipe never names. The workflow template names four files, and the recipe patches in two
@@ -85,16 +96,33 @@ fi
 #
 # HF_HOME still moves onto $MODELS. Whatever the mechanism, its cache must not land on the
 # container overlay, which is 30-40 GB against a 43 GB file.
+# Is a path a mount point in its own right? Parsed from /proc/self/mountinfo rather than by
+# calling `mountpoint`, which lives in util-linux and is not installed in this image. Field 5
+# of each mountinfo line is the mount point, compared whole so a path that merely appears
+# elsewhere on the line (the in-filesystem root, an option string) cannot match by accident.
+_is_mountpoint() {
+    local target="$1" mp
+    while read -r _ _ _ _ mp _; do
+        [ "$mp" = "$target" ] && return 0
+    done < /proc/self/mountinfo
+    return 1
+}
+
 export HF_HUB_DISABLE_XET=1
 export HF_HOME="$MODELS/.hf"
 mkdir -p "$HF_HOME" 2>/dev/null
 
-# dest_dir_under_$MODELS|final_filename|repo|path_in_repo (empty = filename at repo root)
+# dest_dir_under_$MODELS|final_filename|repo|path_in_repo|approx_GiB
+#
+# The size column is for the free-space precheck below and nothing else. It is approximate on
+# purpose: rounded up from the 3090's verified copies, so the check errs towards refusing a
+# marginal disk rather than towards starting a download that cannot finish. Integrity is not
+# its job -- the safetensors header check at the bottom of this file does that exactly.
 _WANTED=(
-  "ltx-2.3/diffusion_models|10Eros_v1.5_bf16.safetensors|TenStrip/LTX2.3-10Eros|"
-  "ltx-2.3/text_encoders|gemma_3_12B_it_fp8_scaled.safetensors|Comfy-Org/ltx-2|split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors"
-  "ltx-2.3/latent_upscale_models|ltx-2.3-spatial-upscaler-x2-1.1.safetensors|Lightricks/LTX-2.3|"
-  "loras|sulphur_distill_lora_condsafe.safetensors|SulphurAI/Sulphur-2-base|distill_loras/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
+  "ltx-2.3/diffusion_models|10Eros_v1.5_bf16.safetensors|TenStrip/LTX2.3-10Eros||43"
+  "ltx-2.3/text_encoders|gemma_3_12B_it_fp8_scaled.safetensors|Comfy-Org/ltx-2|split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors|13"
+  "ltx-2.3/latent_upscale_models|ltx-2.3-spatial-upscaler-x2-1.1.safetensors|Lightricks/LTX-2.3||1"
+  "loras|sulphur_distill_lora_condsafe.safetensors|SulphurAI/Sulphur-2-base|distill_loras/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors|1"
 )
 # Character LoRAs are NOT here: the daemon syncs those per claim from S3, so a pod carries
 # only the ones its jobs actually name.
@@ -186,23 +214,80 @@ PYEOF
 }
 
 NEED_FETCH=0
+MISSING_NAMES=""
+NEED_GIB=0
 for row in "${_WANTED[@]}"; do
-    IFS='|' read -r d n _r _p <<< "$row"
-    [ -s "$MODELS/$d/$n" ] || NEED_FETCH=1
+    IFS='|' read -r d n _r _p gib <<< "$row"
+    if [ ! -s "$MODELS/$d/$n" ]; then
+        NEED_FETCH=1
+        MISSING_NAMES="$MISSING_NAMES $d/$n"
+        NEED_GIB=$(( NEED_GIB + ${gib:-0} ))
+    fi
 done
 
 if [ "$NEED_FETCH" -eq 1 ]; then
+    echo "missing:$MISSING_NAMES"
+
+    # ---------- Is this model root the host's, or ours to fill? ----------
+    #
+    # A BIND-MOUNTED $MODELS is host-provided and AUTHORITATIVE. That is the 3090, where the
+    # tree is 217 GB of weights that exist outside any container and are managed by hand. If a
+    # file the recipe needs is not in it, the fault is in the mount or in the host tree, and
+    # the answer is to fix that -- not to fetch a second copy of a 43 GB file the box already
+    # has, and certainly not into a mount that is read-only anyway.
+    #
+    # An UNMOUNTED $MODELS is a pod's own directory, which starts empty and is ours to fill.
+    #
+    # Note this is only consulted when something is MISSING. A complete bind-mounted tree never
+    # reaches here, which is the 3090's normal boot: "models OK" in about a second.
+    if _is_mountpoint "$MODELS"; then
+        echo "!! FATAL: $MODELS is a bind mount from the host, and it is incomplete."
+        echo "!! The host provides these models; downloading a second copy here is wrong."
+        echo "!! Fix the host tree (on the 3090: /home/david/LTX-2/models) or the mount."
+        exit 1
+    fi
+
+    # Kept below the mount check, which now catches the 3090 with a better message. This
+    # remains for a read-only model root that is NOT a mount -- a baked-in or squashed image
+    # layer, say. Unreachable today; a one-line guard against a silent permission failure
+    # 40 GB into a download is worth keeping anyway.
     if [ ! -w "$MODELS" ]; then
-        echo "!! FATAL: models are missing and $MODELS is read-only."
-        echo "!! That is the 3090's bind mount — fix the mount rather than downloading here."
+        echo "!! FATAL: models are missing and $MODELS is read-only, so they cannot be staged."
+        exit 1
+    fi
+
+    # ---------- Somewhere to actually put it ----------
+    #
+    # The container overlay is 30-40 GB and 10Eros alone is 43. A fetch onto it cannot finish,
+    # however long it runs -- the first real pod died exactly this way, at 28 GB of 43, with
+    # its 60 GB volume sitting empty beside it, and a hand-started container on the 3090
+    # repeated it (#77). Both spent hours proving something knowable in one `df`.
+    #
+    # A little headroom on top, because the staging copy and the final file briefly coexist
+    # while the rename lands and hf's cache holds blocks of its own.
+    #
+    # No awk. `awk` here is mawk, which renders a large integer through CONVFMT "%.6g" -- so a
+    # 150 GB free-space figure prints as 1.5e+11 and bash cannot subtract it. That is the same
+    # trap that made a 28 GB download report itself as 1.9 GB. df's POSIX format is five fixed
+    # fields and bash can read them directly.
+    avail_bytes=0
+    read -r _ _ _ avail_bytes _ <<< "$(df -PB1 "$MODELS" 2>/dev/null | tail -1)"
+    avail_gib=$(( ${avail_bytes:-0} / 1073741824 ))
+    want_gib=$(( NEED_GIB + 5 ))
+    if [ "$avail_gib" -lt "$want_gib" ]; then
+        echo "!! FATAL: need ~${want_gib} GiB free under $MODELS to stage the missing models,"
+        echo "!! but only ${avail_gib} GiB is available."
+        echo "!! $MODELS is not a mount here, so this is the container's own filesystem —"
+        echo "!! it is almost certainly missing a volume (pod) or a -v bind mount (3090)."
+        echo "!! Refusing to start a download that cannot complete."
         exit 1
     fi
     python3 -c "import huggingface_hub" 2>/dev/null \
         || pip install --no-cache-dir -q huggingface_hub \
         || { echo "!! FATAL: huggingface_hub is not installed and could not be installed"; exit 1; }
-    echo "staging models (~58 GB on a cold pod; anything already present is skipped)"
+    echo "staging ~${NEED_GIB} GiB into $MODELS (${avail_gib} GiB free)"
     for row in "${_WANTED[@]}"; do
-        IFS='|' read -r d n r pth <<< "$row"
+        IFS='|' read -r d n r pth _gib <<< "$row"
         _fetch "$d" "$n" "$r" "$pth" || FAIL=1
     done
 fi
