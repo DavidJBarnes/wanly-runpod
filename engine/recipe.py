@@ -27,6 +27,22 @@ from pathlib import Path
 HERE = Path(__file__).parent
 RECIPE_WORKFLOW = "ltx23_recipe.api.json"
 
+# The base model a render falls back to when the caller names none (console#431).
+#
+# THREE PLACES ANSWER THIS AND ALL THREE MUST AGREE:
+#
+#   * here -- what actually renders
+#   * download_models.sh's _WANTED -- what a cold container or pod actually HAS
+#   * wanly-api's LTX_STACK['checkpoint'] -- what the API gates claims against
+#
+# They live in two repos and cannot share a constant, so the coupling is held by
+# test_default_checkpoint_is_the_one_a_cold_pod_fetches() below, which reads the shell
+# script. A comment would not have been enough: the failure is silent. A pod that fetched
+# a different checkpoint than the default reports it through the heartbeat, the API's model
+# gate then hides every default pose from it, and it claims nothing at all -- which looks
+# like an empty queue rather than like a broken pod.
+DEFAULT_CHECKPOINT = "10Eros_v1.5_bf16"
+
 
 def _is_none(name: str | None) -> bool:
     """Is this the caller saying "no LoRA"?
@@ -59,7 +75,7 @@ def resolve(graph: dict, image_name: str, width: int, height: int, *,
     the handful of fields that vary between renders.
     """
     g = json.loads(json.dumps(graph))
-    ck = checkpoint or "sulphur_dev_bf16"
+    ck = checkpoint or DEFAULT_CHECKPOINT
     if not ck.endswith(".safetensors"):
         ck += ".safetensors"
     # 2.3 checkpoints are monoliths: every loader naming the file must move
