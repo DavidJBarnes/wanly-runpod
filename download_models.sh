@@ -40,13 +40,25 @@ fi
 #
 # Sources are RECORDED, never guessed. The Lightricks and Comfy-Org entries come from
 # ~/LTX-2/download-ltx23.sh and download-gemma-comfy.sh on the 3090, which lived only on that
-# box. The two sulphur files are Sulphur 2, a drop-in LTX 2.3 replacement published at
-# SulphurAI/Sulphur-2-base; the distill LoRA is stored here under a shorter name.
+# box. The distill LoRA is Sulphur 2's, from SulphurAI/Sulphur-2-base, stored here under a
+# shorter name. The checkpoint is 10Eros v1.5 from TenStrip/LTX2.3-10Eros -- verified to be
+# the same 46,139,886,366-byte file the 3090 has been rendering on.
+#
+# THE CHECKPOINT HERE IS THE DEFAULT, and that is not a coincidence to be maintained by hand.
+# It must equal engine/recipe.py's DEFAULT_CHECKPOINT, which is asserted by
+# tests/test_recipe_resolve.py. A pod that fetches a checkpoint other than the default
+# reports it through the heartbeat, the API's model gate hides every default pose from it,
+# and it sits there claiming nothing -- indistinguishable from an empty queue.
+#
+# Only the default is fetched, not every checkpoint a pose might name. Each is ~46 GB, so
+# fetching both 10Eros and sulphur would take a cold boot from ~58 GB to ~104 and roughly
+# double time-to-first-claim. A pod simply is not offered poses it cannot render; the model
+# gate (wanly-api _model_gate, console#422) already handles that correctly.
 #
 # WHAT a pod needs is what a RENDER loads, which is not what the workflow template names and
 # not what the folder holds. The template says ltx-2.3-22b-dev.safetensors in three loaders,
-# but the recipe patches all three to sulphur_dev_bf16 before submission, so the dev
-# checkpoint never loads -- 43 GB that a pod would download and never open. Same for
+# but the recipe patches all three to the render's own checkpoint before submission, so the
+# dev checkpoint never loads -- 43 GB that a pod would download and never open. Same for
 # ltx-2.3-22b-distilled-lora-384-1.1: the recipe substitutes the sulphur distill LoRA.
 # Confirmed against the resolved graph.json of a real render rather than read off the graph
 # template. That is the difference between fetching 58 GB and fetching 108.
@@ -79,7 +91,7 @@ mkdir -p "$HF_HOME" 2>/dev/null
 
 # dest_dir_under_$MODELS|final_filename|repo|path_in_repo (empty = filename at repo root)
 _WANTED=(
-  "ltx-2.3/diffusion_models|sulphur_dev_bf16.safetensors|SulphurAI/Sulphur-2-base|"
+  "ltx-2.3/diffusion_models|10Eros_v1.5_bf16.safetensors|TenStrip/LTX2.3-10Eros|"
   "ltx-2.3/text_encoders|gemma_3_12B_it_fp8_scaled.safetensors|Comfy-Org/ltx-2|split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors"
   "ltx-2.3/latent_upscale_models|ltx-2.3-spatial-upscaler-x2-1.1.safetensors|Lightricks/LTX-2.3|"
   "loras|sulphur_distill_lora_condsafe.safetensors|SulphurAI/Sulphur-2-base|distill_loras/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"

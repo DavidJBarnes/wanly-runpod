@@ -12,6 +12,7 @@ the default.
 import hashlib
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -33,12 +34,21 @@ BASE = dict(image_name="kf1.png", width=832, height=1216, prompt="a prompt")
 
 
 def test_a_pose_with_no_content_lora_is_the_graph_that_was_validated(graph):
-    """Every existing pose is this case, so this hash is the regression line.
+    """The regression line for the RESOLVER: if this hash moves, output moved with it, and
+    the symptom would be renders that are subtly different rather than an error.
 
-    If it moves, every validated render moved with it — and the symptom would be output
-    that is subtly different rather than an error.
+    The checkpoint is named EXPLICITLY (console#431). It used to be left to the default,
+    which quietly made this hash a pin on two separate things — how the resolver patches a
+    graph, and which base model happens to be default. When the default moved to 10Eros the
+    hash moved with it, and a tripwire that fires on an intended policy change is one that
+    gets re-pinned by reflex until it stops guarding anything.
+
+    Verified at the time of the switch: naming sulphur here reproduces the pinned hash
+    byte-for-byte, and the only difference against the new default is ckpt_name on nodes
+    9500/9501/9502. The resolver itself did not move.
     """
-    g = recipe_mod.resolve(graph, **BASE, char_lora="k3lly2026_v2")
+    g = recipe_mod.resolve(graph, **BASE, char_lora="k3lly2026_v2",
+                           checkpoint="sulphur_dev_bf16")
     # Pinned against the resolver as it stood BEFORE content strengths were configurable
     # (verified by running both versions side by side over four configurations). A change
     # here is a change to every validated render, so it should require deleting this line.
@@ -46,6 +56,23 @@ def test_a_pose_with_no_content_lora_is_the_graph_that_was_validated(graph):
     # And the property behind the hash, stated so a legitimate re-pin still has to hold it.
     assert "9601" not in g
     assert "9602" not in g
+
+
+def test_the_default_changes_nothing_but_the_checkpoint(graph):
+    """What moving the default is allowed to do, stated as a test (console#431).
+
+    Exactly three loaders change and nothing else. 2.3 checkpoints are monoliths, so all
+    three must move together — a default that reached two of them would load two different
+    base models in one render.
+    """
+    explicit = recipe_mod.resolve(graph, **BASE, char_lora="k3lly2026_v2",
+                                  checkpoint="sulphur_dev_bf16")
+    default = recipe_mod.resolve(graph, **BASE, char_lora="k3lly2026_v2")
+    differing = {k for k in explicit if explicit[k] != default[k]}
+    assert differing == {"9500", "9501", "9502"}
+    for nid in differing:
+        assert default[nid]["inputs"]["ckpt_name"] == \
+            f"{recipe_mod.DEFAULT_CHECKPOINT}.safetensors"
 
 
 def test_the_default_strengths_are_the_old_hardcode(graph):
@@ -179,7 +206,28 @@ def test_the_default_base_model_is_named_too(graph):
     and "the default" become indistinguishable in a log."""
     from engine.recipe import base_model_note
     g = recipe_mod.resolve(graph, **BASE, char_lora="k3lly2026_v2")
-    assert base_model_note(g) == "sulphur_dev_bf16"
+    assert base_model_note(g) == recipe_mod.DEFAULT_CHECKPOINT
+
+
+def test_default_checkpoint_is_the_one_a_cold_pod_fetches():
+    """The default and the download list must name the same checkpoint (console#431).
+
+    They are separate files in separate languages and nothing but this test connects them.
+    It is here rather than in a comment because the failure is silent and expensive: a pod
+    that fetched sulphur while the default is 10Eros boots green, reports sulphur through
+    its heartbeat, and is then refused every default pose by the API's model gate. It
+    claims nothing, and an idle pod is indistinguishable from an empty queue.
+
+    Parsed out of the _WANTED array rather than grepped for the bare name, so that a stale
+    mention of the checkpoint in a nearby comment cannot make this pass.
+    """
+    script = (pathlib.Path(__file__).parent.parent / "download_models.sh").read_text()
+    rows = re.findall(r'^\s*"([^"]+\|[^"]*)"\s*$', script, re.MULTILINE)
+    fetched = {r.split("|")[1] for r in rows if r.split("|")[0].endswith("diffusion_models")}
+    assert fetched == {f"{recipe_mod.DEFAULT_CHECKPOINT}.safetensors"}, (
+        f"download_models.sh fetches {fetched}, but the engine defaults to "
+        f"{recipe_mod.DEFAULT_CHECKPOINT!r}"
+    )
 
 
 def test_the_note_works_without_any_lora(graph):
