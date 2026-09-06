@@ -14,7 +14,6 @@ import pathlib
 import shutil
 import stat
 import subprocess
-import textwrap
 
 DEPLOY = pathlib.Path(__file__).parent.parent / "deploy"
 RUN = DEPLOY / "run-worker.sh"

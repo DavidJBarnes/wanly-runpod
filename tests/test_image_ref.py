@@ -10,25 +10,27 @@ The daemon now reports WANLY_IMAGE_REF upstream, so this value stops being decor
 import pathlib
 import re
 
-import yaml
-
 ROOT = pathlib.Path(__file__).parent.parent
 DOCKERFILE = ROOT / "Dockerfile"
 WORKFLOW = ROOT / ".github/workflows/build-push.yml"
 
 
-def _build_step():
-    d = yaml.safe_load(WORKFLOW.read_text())
-    for job in d["jobs"].values():
-        for step in job["steps"]:
-            if "build-push-action" in str(step.get("uses", "")):
-                return step
-    raise AssertionError("no docker build step in the workflow")
+def _build_args_block() -> str:
+    """The build-args block from the docker build step.
+
+    Read with a regex rather than a YAML parser: every other test in this repo is
+    stdlib-only, and PyYAML is not installed in CI -- importing it turned a passing suite
+    into a collection error, which is a worse outcome than a slightly cruder parse.
+    """
+    text = WORKFLOW.read_text()
+    assert "build-push-action" in text, "no docker build step in the workflow"
+    m = re.search(r"^\s*build-args:\s*\|?\s*\n((?:\s+\S.*\n)+)", text, re.M)
+    return m.group(1) if m else ""
 
 
 def test_the_build_passes_the_commit():
     """THE fix. Without this the ARG defaults to 'unknown' and the whole chain is inert."""
-    args = _build_step()["with"].get("build-args", "")
+    args = _build_args_block()
     assert "GIT_SHA=" in args, "the build does not pass GIT_SHA; the image cannot identify itself"
     assert "github.sha" in args, "GIT_SHA must come from the commit, not a literal"
 
