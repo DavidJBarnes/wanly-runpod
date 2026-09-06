@@ -60,7 +60,24 @@ Re-enable the timer afterwards or it will pull `:latest` back over the pin at th
 
 ## What it will never do
 
-Recreate mid-render. A render is 10-13 minutes and interrupting one loses the work and leaves
-the segment to be reclaimed by the stale-heartbeat path — costing more than the drift it fixes.
-An unreachable engine counts as busy, because a box that is mid-boot must not be interrupted
-either.
+Recreate while the worker holds a claim.
+
+**Two signals, both must say idle.** The worker's own status from the API, and the engine's
+health. They cover different spans and each catches the other's blind spot:
+
+| signal | covers | blind to |
+|---|---|---|
+| worker status (`online-idle`) | the whole claim — set the instant work is received, before `[1/6]` | a failed status push from the daemon |
+| engine `running`/`queue_depth` | the render itself, from `[3/6]` | `[1/6]`–`[2/6]`: image and LoRA/checkpoint fetch |
+
+The engine-only version of this cost a segment on 2026-09-06: a container was recreated 50%
+through a 673 MB LoRA download in `[2/6]`, where the engine truthfully reports `running: 0`.
+Because registration reuses the worker row, the abandoned segment was pinned to a live, busy
+worker that no reclaim rule could reach, and it sat in `PROCESSING` for seven hours.
+
+That window is now much wider than it was: console#423 lets a worker fetch a 46 GB checkpoint
+on demand, which is roughly twenty minutes inside `[2/6]`.
+
+Anything unreadable — the API, the engine, a worker that has not registered yet — counts as
+**busy**. A box mid-boot must not be interrupted either; on a cold pod that is ~58 GB of
+staging thrown away.

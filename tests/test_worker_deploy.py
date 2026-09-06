@@ -70,39 +70,58 @@ class TestTheIdleCheck:
             "the idle check must run inside the container, not against the published port"
 
 
-def _fake_docker(tmp, *, running_image, latest_image, busy):
-    """A `docker` shim covering exactly the calls update-worker.sh makes."""
+def _stage(tmp, *, running_image, latest_image, engine_busy, worker_status):
+    """Stage the real update-worker.sh with fakes for every external call it makes.
+
+    Two separate fakes, because the script asks two different things:
+      * `curl` on the HOST            -> the API's /workers, for the worker's own status
+      * `curl` INSIDE the container   -> the engine's /health, via docker exec
+    """
     bin_dir = tmp / "bin"
     bin_dir.mkdir(exist_ok=True)
-    (bin_dir / "docker").write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env bash
-        case "$1 $2" in
-          "inspect wanly-ltx")            echo present; exit 0 ;;
-        esac
-        case "$*" in
-          "inspect -f {{{{.Image}}}} wanly-ltx")  echo "{running_image}"; exit 0 ;;
-          "pull -q "*)                            exit 0 ;;
-          "image inspect "*)                      echo "{latest_image}"; exit 0 ;;
-          *"curl"*)                               echo '{{"queue_depth":0,"running":{busy}}}'; exit 0 ;;
-        esac
-        exit 0
-        """))
+
+    if engine_busy is None:
+        engine_case = "exit 7"
+    else:
+        engine_case = "echo '{\"queue_depth\":0,\"running\":%d}'" % engine_busy
+
+    docker = "\n".join([
+        "#!/usr/bin/env bash",
+        'case "$*" in',
+        '  "inspect -f {{.Image}} wanly-ltx")  echo "%s"; exit 0 ;;' % running_image,
+        '  "pull -q "*)                        exit 0 ;;',
+        '  "image inspect "*)                  echo "%s"; exit 0 ;;' % latest_image,
+        '  *"curl"*)                           %s ;;' % engine_case,
+        'esac',
+        'exit 0',
+        '',
+    ])
+    (bin_dir / "docker").write_text(docker)
     (bin_dir / "docker").chmod(0o755)
-    # run-worker.sh is replaced: this test is about the DECISION, not the docker run.
-    (bin_dir / "run-worker.sh").write_text("#!/usr/bin/env bash\necho RECREATED\n")
-    (bin_dir / "run-worker.sh").chmod(0o755)
-    return bin_dir
 
+    if worker_status is None:
+        body = "BAD NOT JSON"
+    elif worker_status == "absent":
+        body = "[]"
+    else:
+        body = '[{"friendly_name":"3090.zero","status":"%s"}]' % worker_status
+    (bin_dir / "curl").write_text("#!/usr/bin/env bash\ncat <<'JSON'\n%s\nJSON\n" % body)
+    (bin_dir / "curl").chmod(0o755)
 
-def _run(tmp_path, *, running_image, latest_image, busy):
-    bin_dir = _fake_docker(tmp_path, running_image=running_image,
-                           latest_image=latest_image, busy=busy)
-    stage = tmp_path / "deploy"
+    stage = tmp / "deploy"
     stage.mkdir(exist_ok=True)
     shutil.copy(UPDATE, stage / "update-worker.sh")
-    shutil.copy(bin_dir / "run-worker.sh", stage / "run-worker.sh")
+    (stage / "run-worker.sh").write_text("#!/usr/bin/env bash\necho RECREATED\n")
     (stage / "run-worker.sh").chmod(0o755)
-    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    (stage / "worker.env").write_text(
+        "QUEUE_URL=http://api.test:8001\nQUEUE_API_KEY=k\nFRIENDLY_NAME=3090.zero\n")
+    return bin_dir, stage
+
+
+def _run(tmp_path, *, running_image, latest_image, engine_busy=0, worker_status="online-idle"):
+    bin_dir, stage = _stage(tmp_path, running_image=running_image, latest_image=latest_image,
+                            engine_busy=engine_busy, worker_status=worker_status)
+    env = dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ["PATH"]))
     return subprocess.run(["bash", str(stage / "update-worker.sh")],
                           capture_output=True, text=True, env=env)
 
@@ -112,60 +131,65 @@ class TestTheDecision:
     NEW = "sha256:bbb"
 
     def test_it_does_nothing_when_the_image_has_not_changed(self, tmp_path):
-        """It runs on a timer against an image that is almost always unchanged, so the
-        no-op path is the common one and must be silent and cheap."""
-        r = _run(tmp_path, running_image=self.SAME, latest_image=self.SAME, busy=0)
-        assert r.returncode == 0
-        assert "nothing to do" in r.stdout
-        assert "RECREATED" not in r.stdout
+        """The common path — it runs on a timer against an image that rarely changes."""
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.SAME)
+        assert "nothing to do" in r.stdout and "RECREATED" not in r.stdout
 
     def test_it_recreates_when_the_image_changed_and_the_worker_is_idle(self, tmp_path):
-        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW, busy=0)
-        assert r.returncode == 0
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW)
         assert "RECREATED" in r.stdout, r.stdout
 
-    def test_it_leaves_a_busy_worker_alone(self, tmp_path):
-        """THE one that matters. A render is 10-13 minutes; interrupting it loses the work
-        AND leaves the segment to be reclaimed, costing more than the drift it fixes."""
-        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW, busy=1)
-        assert r.returncode == 0
-        assert "RECREATED" not in r.stdout, "recreated the container mid-render"
-        assert "in flight" in r.stdout
+    def test_it_leaves_a_worker_alone_that_holds_a_claim(self, tmp_path):
+        """THE regression, 2026-09-06.
+
+        The daemon sets online-busy the instant it receives a claim, BEFORE [1/6]. The engine
+        knows nothing until [3/6]. A container was recreated 50% through a 673 MB LoRA
+        download in [2/6] — engine truthfully idle, worker very much not — and the abandoned
+        segment sat in PROCESSING for seven hours, pinned to a live worker where no reclaim
+        rule could reach it.
+
+        console#423 widened the window the same day: an on-demand 46 GB checkpoint fetch is
+        ~20 minutes inside [2/6] with the engine reporting idle throughout.
+        """
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW,
+                 worker_status="online-busy", engine_busy=0)
+        assert "RECREATED" not in r.stdout, "recreated while the worker held a claim"
+        assert "online-busy" in r.stdout
+
+    def test_it_believes_the_engine_over_a_worker_claiming_to_be_idle(self, tmp_path):
+        """The daemon's status push can fail — the API's own reclaim logic says so. When the
+        two disagree, the one that is actually rendering wins."""
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW,
+                 worker_status="online-idle", engine_busy=1)
+        assert "RECREATED" not in r.stdout
+        assert "despite status" in r.stdout
+
+    def test_an_unregistered_worker_is_not_idle(self, tmp_path):
+        """A worker mid-boot has not registered yet. Recreating then interrupts model
+        staging, which on a cold pod is ~58 GB of downloads."""
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW,
+                 worker_status="absent")
+        assert "RECREATED" not in r.stdout
+        assert "not-registered" in r.stdout
+
+    def test_an_unreadable_api_counts_as_busy(self, tmp_path):
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW, worker_status=None)
+        assert "RECREATED" not in r.stdout
+        assert "unreadable" in r.stdout
 
     def test_an_unreadable_engine_counts_as_busy(self, tmp_path):
-        """Fail SAFE. An unreachable engine is not evidence of idleness -- it may be
-        mid-boot, and recreating then interrupts model staging."""
-        bin_dir = _fake_docker(tmp_path, running_image=self.SAME,
-                               latest_image=self.NEW, busy=0)
-        (bin_dir / "docker").write_text(textwrap.dedent(f"""\
-            #!/usr/bin/env bash
-            case "$*" in
-              "inspect -f {{{{.Image}}}} wanly-ltx")  echo "{self.SAME}"; exit 0 ;;
-              "pull -q "*)                            exit 0 ;;
-              "image inspect "*)                      echo "{self.NEW}"; exit 0 ;;
-              *"curl"*)                               exit 7 ;;
-            esac
-            exit 0
-            """))
-        (bin_dir / "docker").chmod(0o755)
-        stage = tmp_path / "deploy"; stage.mkdir(exist_ok=True)
-        shutil.copy(UPDATE, stage / "update-worker.sh")
-        shutil.copy(bin_dir / "run-worker.sh", stage / "run-worker.sh")
-        (stage / "run-worker.sh").chmod(0o755)
-        env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
-        r = subprocess.run(["bash", str(stage / "update-worker.sh")],
-                           capture_output=True, text=True, env=env)
+        """Fail safe on both signals, not just the API one."""
+        r = _run(tmp_path, running_image=self.SAME, latest_image=self.NEW, engine_busy=None)
         assert "RECREATED" not in r.stdout
         assert "assuming busy" in r.stdout
 
 
 def test_the_scripts_are_executable():
     for p in (RUN, UPDATE):
-        assert os.stat(p).st_mode & stat.S_IXUSR, f"{p.name} is not executable"
+        assert os.stat(p).st_mode & stat.S_IXUSR, "%s is not executable" % p.name
 
 
 def test_no_secret_is_committed():
     """worker.env carries the queue key and must never be in the repo."""
     assert not (DEPLOY / "worker.env").exists()
-    assert "QUEUE_API_KEY=" in (DEPLOY / "worker.env.example").read_text()
     assert (DEPLOY / "worker.env.example").read_text().count("QUEUE_API_KEY=\n") == 1

@@ -19,6 +19,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${IMAGE:-davidjbarnes/wanly-gpu-docker:latest}"
 NAME="${NAME:-wanly-ltx}"
 
+# Needed for the idle check below: QUEUE_URL, QUEUE_API_KEY and FRIENDLY_NAME identify this
+# worker to the API. Sourced rather than required, so the script still runs (and still
+# refuses to act) on a box where the file is absent -- an unreadable status counts as busy.
+ENV_FILE="${WORKER_ENV:-$HERE/worker.env}"
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    set -a; . "$ENV_FILE"; set +a
+fi
+
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 
 if ! docker inspect "$NAME" >/dev/null 2>&1; then
@@ -39,15 +48,49 @@ fi
 
 log "image changed: $(echo "$running_image" | cut -c8-19) -> $(echo "$latest_image" | cut -c8-19)"
 
-# Ask the ENGINE whether a render is in flight, not the GPU. A busy GPU could be
-# Automatic1111 on the same box; an idle GPU can still be a claimed segment between diffusion
-# stages. The engine knows what it is running, and it is what recreating the container kills.
+# TWO independent signals, and BOTH must say idle. Each covers the other's blind spot.
 #
-# Asked with `docker exec`, NOT through the published port. The engine binds 127.0.0.1 INSIDE
-# the container, so the -p 8190:8190 mapping resolves to nothing and a host-side curl returns
-# empty -- which, parsed naively, reads as "idle" and would recreate the container mid-render.
-# Verified on the 3090: host curl fails, `docker exec` returns
-# {"queue_depth":0,"running":1,...}.
+#   1. THE WORKER'S OWN STATUS, from the API. The daemon sets online-busy the instant it
+#      receives a claim, BEFORE [1/6], and online-idle only once the segment finishes. That
+#      is the only signal covering the WHOLE claim.
+#
+#      This is the check that was missing, and its absence cost a segment. The first version
+#      asked only the engine -- which knows nothing until [3/6] Submitting. A container was
+#      recreated 50% through a 673 MB LoRA download in [2/6]; the engine truthfully said
+#      running=0, the segment was abandoned mid-claim, and because registration reuses the
+#      worker row it was pinned to a live busy worker where no reclaim rule could reach it.
+#      It sat in PROCESSING for seven hours.
+#
+#      The gap widened the same day: console#423 lets a worker fetch a 46 GB checkpoint on
+#      demand, which is ~20 minutes inside [2/6] with the engine reporting idle throughout.
+#
+#   2. THE ENGINE. Kept, because the daemon's status push can fail -- the API's own reclaim
+#      logic says so. If the daemon claims idle while the engine is rendering, believe the
+#      engine.
+#
+# Asked with `docker exec`, NOT through the published port: the engine binds 127.0.0.1 INSIDE
+# the container, so -p 8190:8190 resolves to nothing and a host curl returns empty -- which
+# parsed naively reads as "idle".
+worker_status=$(curl -sf --max-time 15 -H "X-API-Key: ${QUEUE_API_KEY:-}" \
+                  "${QUEUE_URL:-}/workers" 2>/dev/null \
+                | FRIENDLY_NAME="${FRIENDLY_NAME:-}" python3 -c '
+import json, os, sys
+name = os.environ.get("FRIENDLY_NAME", "")
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    print("unreadable"); raise SystemExit
+me = [w for w in rows if w.get("friendly_name") == name]
+# Not finding ourselves is NOT idleness. A worker mid-boot has not registered yet, and
+# recreating then interrupts model staging.
+print(me[0].get("status") or "unknown" if me else "not-registered")
+' 2>/dev/null || echo unreadable)
+
+if [ "$worker_status" != "online-idle" ]; then
+    log "worker status is '$worker_status' (want online-idle) — leaving it alone, will retry next run"
+    exit 0
+fi
+
 busy=$(docker exec "$NAME" curl -sf --max-time 10 http://127.0.0.1:8190/health 2>/dev/null \
        | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d.get("running") or 0)+(d.get("queue_depth") or 0))' 2>/dev/null || echo unknown)
 
@@ -58,7 +101,9 @@ if [ "$busy" = "unknown" ]; then
     exit 0
 fi
 if [ "$busy" != "0" ]; then
-    log "engine reports $busy job(s) in flight — leaving it alone, will retry next run"
+    # The daemon said idle and the engine disagrees. Believe the engine: a failed status push
+    # is a known mode, and being wrong here costs a render.
+    log "engine reports $busy job(s) in flight despite status '$worker_status' — leaving it alone"
     exit 0
 fi
 
