@@ -72,7 +72,8 @@ def test_the_sweep_leaves_the_newest_dirs_alone(tmp_path):
     """A render that finished seconds ago may still be being fetched by the daemon, and the
     sweep has no coordination with in-flight jobs. Skipping the newest is cheaper than a
     race whose loser is a lost render."""
-    import os, time
+    import os
+    import time
     for i in range(8):
         d = tmp_path / f"job{i}"
         d.mkdir()

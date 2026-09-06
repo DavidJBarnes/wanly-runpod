@@ -145,8 +145,19 @@ COPY download_models.sh /app/download_models.sh
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh /app/download_models.sh && mkdir -p /jobs /workspace/logs
 
+# The commit this IMAGE was built from. Distinct from the daemon's commit, which is cloned
+# from main at every container boot -- the two drift separately and `docker restart` moves
+# only the daemon (wanly-gpu-docker#72).
+#
+# The build workflow must pass --build-arg GIT_SHA. Without it this defaults to "unknown",
+# which is exactly what every image published before #72 reports: start.sh has printed
+# "image build: ${GIT_SHA:-unknown}" since it was added, and it has always said unknown.
 ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
+# Same value under the name the daemon reports upstream. Named rather than reusing GIT_SHA
+# directly so the heartbeat field cannot be confused with any other component's sha inside an
+# image that also clones ComfyUI and five node packs.
+ENV WANLY_IMAGE_REF=$GIT_SHA
 
 EXPOSE 8188 8190 22
 CMD ["/app/start.sh"]
