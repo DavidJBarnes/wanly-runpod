@@ -132,17 +132,14 @@ FRIENDLY_NAME=${FRIENDLY_NAME:-ltx-${RUNPOD_POD_ID:-$(hostname)}}
 ENGINE=ltx
 LTX_ENGINE_URL=http://localhost:${API_PORT:-8190}
 COMFYUI_URL=http://localhost:${COMFY_PORT:-8188}
-# EMPTY on purpose. With a path set, the daemon takes ownership of ComfyUI: it checks for
-# custom node packs and clones the ones it thinks are missing, and it runs a "resource sync"
-# that downloads model files from S3. Both are WAN-era jobs and both break an LTX worker:
+# EMPTY on purpose. With a path set, the daemon takes ownership of ComfyUI and checks for
+# custom node packs, cloning the ones it thinks are missing. That is a WAN-era job and it
+# breaks an LTX worker: it cloned Frame-Interpolation and ReActor into the LTX ComfyUI, and
+# ReActor unpinned requirements pull transformers >=5, which breaks every workflow.
 #
-#   * the node check cloned Frame-Interpolation and ReActor into the LTX ComfyUI, and
-#     ReActor's unpinned requirements pull transformers >=5, which breaks every workflow
-#   * the resource sync tried to fetch rife49.pth, deleted with WAN, got a 404 from S3 and
-#     exited -- restart-looping a pod that had just got past ComfyUI for the first time:
-#
-#         ERROR Resource rife49.pth: download failed ... HTTP 404
-#         ERROR Resource sync failed. Exiting.
+# It also used to run a "resource sync" that fetched model files from S3 and exited the
+# daemon when that failed, restart-looping the pod. That is gone (wanly-gpu-daemon#175);
+# the node check is now the only reason this stays empty.
 #
 # ltx-engine owns this ComfyUI. The daemon drives the engine and syncs character LoRAs
 # through LORA_CACHE_DIR; it has no business installing nodes or models.
@@ -155,8 +152,19 @@ EOF
 # Dump the resolved config so a parity problem is visible in the first lines of the boot log
 # rather than after a day of results. Secrets redacted: container logs are surfaced in consoles,
 # and a plain `cat` printed QUEUE_API_KEY and RUNPOD_API_KEY in the clear.
+#
+# COMMENTS ARE STRIPPED. This dump exists to show resolved VALUES; the reasoning belongs in
+# this file, not in every boot log. The comment above COMFYUI_PATH used to quote the very
+# log lines it was explaining --
+#
+#     ERROR Resource rife49.pth: download failed ... HTTP 404
+#
+# -- so every healthy boot printed two lines that grep as ERROR, and one of them was read as
+# a live failure during a routine restart. That misread is what filed wanly-gpu-daemon#175.
 echo "Daemon config:"
-sed -E 's/^(.*(KEY|TOKEN|SECRET|PASSWORD))=.+$/\1=<redacted>/' "$DAEMON_DIR/.env" | sed 's/^/  /'
+grep -vE '^[[:space:]]*(#|$)' "$DAEMON_DIR/.env" \
+  | sed -E 's/^(.*(KEY|TOKEN|SECRET|PASSWORD))=.+$/\1=<redacted>/' \
+  | sed 's/^/  /'
 
 # ---------- 4. ComfyUI ----------
 # Fail LOUDLY on a driver too old for this torch build, rather than letting ComfyUI die on
