@@ -3,14 +3,24 @@ Description=Check for a new wanly worker image periodically
 Documentation=https://github.com/DavidJBarnes/wanly-gpu-docker/issues/72
 
 [Timer]
-# Every 30 minutes. The check is a digest comparison after a `docker pull` of an image that is
-# almost always unchanged, so it costs a manifest fetch and nothing else -- there is no reason
-# to be shy about frequency. What SETS the pace is that it can only act while idle: a render
-# is 10-13 minutes, so a 30 minute cadence reliably finds a gap within the hour.
-OnBootSec=10min
-OnUnitActiveSec=30min
-# Do not have every box on the network pull at the same instant after a power cut.
+# Every 30 minutes, on an ABSOLUTE schedule.
+#
+# The first version used OnBootSec + OnUnitActiveSec and silently stopped scheduling.
+# OnUnitActiveSec only re-arms once the TIMER has triggered the service; with OnBootSec
+# already in the past there was nothing left to compute a next elapse from, so the timer sat
+# `active (elapsed)` with `Trigger: n/a` -- enabled, listed, and never going to fire again.
+# Installed and dead is the worst of both, because `is-enabled` says enabled.
+#
+# OnCalendar always has a next elapse regardless of boot time or when the service last ran,
+# which is what "check every 30 minutes, forever" actually needs.
+#
+# The cadence is not set by the cost of checking -- that is a manifest fetch on an image
+# that is almost always unchanged. It is set by having to wait for idle: a render is 10-13
+# minutes, so 30 minutes reliably finds a gap within the hour.
+OnCalendar=*:0/30
+# Do not have every box on the network pull at the same instant.
 RandomizedDelaySec=5min
+# Catch up after downtime rather than waiting for the next slot.
 Persistent=true
 
 [Install]
