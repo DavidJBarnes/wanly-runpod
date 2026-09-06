@@ -1,0 +1,17 @@
+[Unit]
+Description=Check for a new wanly worker image periodically
+Documentation=https://github.com/DavidJBarnes/wanly-gpu-docker/issues/72
+
+[Timer]
+# Every 30 minutes. The check is a digest comparison after a `docker pull` of an image that is
+# almost always unchanged, so it costs a manifest fetch and nothing else -- there is no reason
+# to be shy about frequency. What SETS the pace is that it can only act while idle: a render
+# is 10-13 minutes, so a 30 minute cadence reliably finds a gap within the hour.
+OnBootSec=10min
+OnUnitActiveSec=30min
+# Do not have every box on the network pull at the same instant after a power cut.
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
