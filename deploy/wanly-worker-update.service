@@ -1,0 +1,16 @@
+[Unit]
+Description=Converge the wanly LTX worker on the published image
+Documentation=https://github.com/DavidJBarnes/wanly-gpu-docker/issues/72
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Runs as the user that owns the docker socket and the model tree. Not root: the mounts are
+# under this user's home and a root-created container would write /jobs files they cannot
+# delete.
+User=david
+ExecStart=/home/david/wanly-gpu-docker/deploy/update-worker.sh
+# The script exits 0 when it decides not to act, so a failure here is a real one.
+StandardOutput=journal
+StandardError=journal
