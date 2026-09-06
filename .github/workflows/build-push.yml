@@ -40,5 +40,11 @@ jobs:
             davidjbarnes/wanly-gpu-docker:${{ github.sha }}
             davidjbarnes/wanly22-runpod:latest
             davidjbarnes/wanly22-runpod:${{ github.sha }}
+          # Without this the image reports GIT_SHA=unknown, which is what every build
+          # before #72 did -- start.sh has printed "image build: unknown" on every boot since
+          # the line was added, and the daemon now reports the same value upstream so two
+          # workers on different images can be told apart.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
