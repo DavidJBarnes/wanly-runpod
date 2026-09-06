@@ -11,6 +11,7 @@ leaves a segment to be reclaimed; never recreating leaves the drift in place.
 """
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -58,6 +59,22 @@ class TestTheContainerSpecIsComplete:
         assert 'QUEUE_API_KEY:?' in RUN.read_text()
 
 
+class TestTheRename:
+    def test_the_legacy_container_is_adopted_not_duplicated(self):
+        """#77 renamed the container. Creating a second one beside the old is the bad outcome.
+
+        Two containers with the same FRIENDLY_NAME both claim from the same queue, and the API
+        identifies a worker by that name -- it cannot tell them apart, so they fight over
+        segments and each looks like the other going wrong.
+        """
+        s = UPDATE.read_text()
+        assert "docker rename" in s, "no adoption path for the pre-rename container"
+        rename_at = s.index("docker rename")
+        create_at = s.index('exec "$HERE/run-worker.sh"')
+        assert rename_at < create_at, \
+            "the rename must be attempted before falling through to creating a new container"
+
+
 class TestTheIdleCheck:
     def test_it_asks_inside_the_container(self):
         """The engine binds 127.0.0.1 INSIDE the container, so the -p 8190:8190 mapping
@@ -67,6 +84,9 @@ class TestTheIdleCheck:
         s = UPDATE.read_text()
         assert 'docker exec "$NAME" curl' in s, \
             "the idle check must run inside the container, not against the published port"
+
+
+DEFAULT_NAME = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"', UPDATE.read_text(), re.M).group(1)
 
 
 def _stage(tmp, *, running_image, latest_image, engine_busy, worker_status):
@@ -87,7 +107,9 @@ def _stage(tmp, *, running_image, latest_image, engine_busy, worker_status):
     docker = "\n".join([
         "#!/usr/bin/env bash",
         'case "$*" in',
-        '  "inspect -f {{.Image}} wanly-ltx")  echo "%s"; exit 0 ;;' % running_image,
+        # Read from the script rather than hardcoded, so renaming the container does not
+        # silently turn this stub into a no-op that answers every inspect with exit 0.
+        '  "inspect -f {{.Image}} %s")  echo "%s"; exit 0 ;;' % (DEFAULT_NAME, running_image),
         '  "pull -q "*)                        exit 0 ;;',
         '  "image inspect "*)                  echo "%s"; exit 0 ;;' % latest_image,
         '  *"curl"*)                           %s ;;' % engine_case,

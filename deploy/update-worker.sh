@@ -17,7 +17,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${IMAGE:-davidjbarnes/wanly-gpu-docker:latest}"
-NAME="${NAME:-wanly-ltx}"
+NAME="${NAME:-wanly-gpu-docker}"
 
 # Needed for the idle check below: QUEUE_URL, QUEUE_API_KEY and FRIENDLY_NAME identify this
 # worker to the API. Sourced rather than required, so the script still runs (and still
@@ -29,6 +29,19 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
+
+# The container was called wanly-ltx before #77 renamed it. ADOPT it rather than walking past
+# it into run-worker.sh, which would leave two containers with the same FRIENDLY_NAME claiming
+# from the same queue -- the API identifies a worker by that name and cannot tell them apart,
+# so they would fight over segments and each would look like the other going wrong.
+#
+# A rename keeps the running container exactly as it is, so this costs nothing and is a no-op
+# once done. Harmless to leave in place.
+LEGACY_NAME="wanly-ltx"
+if ! docker inspect "$NAME" >/dev/null 2>&1 && docker inspect "$LEGACY_NAME" >/dev/null 2>&1; then
+    log "adopting the pre-#77 container $LEGACY_NAME as $NAME"
+    docker rename "$LEGACY_NAME" "$NAME"
+fi
 
 if ! docker inspect "$NAME" >/dev/null 2>&1; then
     log "no container named $NAME — creating it"
